@@ -15,8 +15,10 @@
 #include <vector>
 #include <random>
 #include <cmath>
+#include <algorithm>
 #include <iostream>
 #include <cassert>
+#include <limits>
 
 /* ------------------------------------------------------------------
  * Helper utilities
@@ -44,14 +46,20 @@ namespace util {
         Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> scores = Q * K.transpose() / std::sqrt(static_cast<Scalar>(d_k));
 
         if (mask) {
-            // mask is expected to be +inf for positions to mask
+            // mask is expected to be -inf for positions to mask
             scores += (*mask);
         }
 
+        // Numerically-stable softmax over the last dimension
+        const Eigen::Matrix<Scalar, Eigen::Dynamic, 1> row_max = scores.rowwise().maxCoeff();
+        const Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> stabilized = scores.colwise() - row_max;
+
         // Softmax over the last dimension
-        Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> exp_scores = scores.unaryExpr([](Scalar x){ return std::exp(x); });
-        Eigen::VectorXd sum_exp = exp_scores.rowwise().sum();
-        Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> attn = exp_scores.array().colwise() / sum_exp.array();
+        Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> exp_scores =
+            stabilized.unaryExpr([](Scalar x) { return std::exp(x); });
+        const Eigen::Matrix<Scalar, Eigen::Dynamic, 1> sum_exp = exp_scores.rowwise().sum();
+        const Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> attn =
+            (exp_scores.array().colwise() / sum_exp.array()).matrix();
 
         return attn * V;
     }
@@ -82,7 +90,7 @@ public:
     }
 
     // x: [seq_len, d_model]
-    // mask: optional, shape [seq_len, seq_len], +inf for masked positions
+    // mask: optional, shape [seq_len, seq_len], -inf for masked positions
     Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>
     operator()(const Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>& x,
                const Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>* mask = nullptr) {
@@ -145,8 +153,10 @@ public:
     Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>
     operator()(const Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>& x) {
         // x: [seq_len, d_model]
-        Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> hidden = (x * W1_.rowwise() + b1_.transpose()).unaryExpr([](Scalar v){ return std::max(v, Scalar(0)); }); // ReLU
-        return (hidden * W2_.rowwise() + b2_.transpose());
+        Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> hidden =
+            ((x * W1_).rowwise() + b1_.transpose())
+                .unaryExpr([](Scalar v) { return std::max(v, Scalar(0)); }); // ReLU
+        return (hidden * W2_).rowwise() + b2_.transpose();
     }
 
 private:
@@ -172,11 +182,17 @@ public:
     Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>
     operator()(const Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>& x) {
         // x: [seq_len, d_model]
-        Eigen::VectorXd mean = x.rowwise().mean();
-        Eigen::VectorXd var  = ((x.rowwise() - mean.transpose()).array().square().rowwise().mean()).matrix();
+        const Eigen::Matrix<Scalar, Eigen::Dynamic, 1> mean = x.rowwise().mean();
+        const Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> centered = x.colwise() - mean;
+        const Eigen::Matrix<Scalar, Eigen::Dynamic, 1> var = centered.array().square().rowwise().mean();
 
-        Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> norm = ((x.rowwise() - mean.transpose()).array().colwise() / (var.array() + eps_).sqrt()).matrix();
-        return norm.array().rowwise() * gamma_.transpose().array() + beta_.transpose().array();
+        const Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> norm =
+            (centered.array().colwise() / (var.array() + eps_).sqrt()).matrix();
+
+        Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> y =
+            (norm.array().rowwise() * gamma_.transpose().array()).matrix();
+        y.rowwise() += beta_.transpose();
+        return y;
     }
 
 private:
@@ -230,12 +246,12 @@ int main() {
     Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> input(seq_len, d_model);
     util::uniform_init(input, Scalar(0.5));
 
-    // Optional mask: +inf for positions to mask (e.g. causal mask)
+    // Optional mask: -inf for positions to mask (e.g. causal mask)
     Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> mask(seq_len, seq_len);
     mask.setZero();
     for (int i = 0; i < seq_len; ++i)
         for (int j = i + 1; j < seq_len; ++j)
-            mask(i, j) = std::numeric_limits<Scalar>::infinity();
+            mask(i, j) = -std::numeric_limits<Scalar>::infinity();
 
     TransformerEncoderBlock<Scalar> block(d_model, num_heads, d_ff);
     Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> output = block(input, &mask);
@@ -243,4 +259,3 @@ int main() {
     std::cout << "Output shape: (" << output.rows() << ", " << output.cols() << ")\n";
     return 0;
 }
-
