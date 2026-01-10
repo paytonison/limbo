@@ -1,2 +1,5 @@
 transformer
 .nvimlog
+/.github/
+/.vscode/
+AGENTS.md
