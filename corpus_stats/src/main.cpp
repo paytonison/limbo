@@ -21,7 +21,17 @@ struct Options {
   std::vector<std::string> exts; // e.g. ".txt", ".jsonl"
   std::size_t preview_lines = 0;
   bool help = false;
+  bool continue_on_error = false;
 };
+
+static Status Ok() { return {0, ""}; }
+
+#define RETURN_IF_ERROR(expr)                                                  \
+  do {                                                                         \
+    Status _s = (expr);                                                        \
+    if (_s.code != 0)                                                          \
+      return _s;                                                               \
+  } while (0)
 
 static void print_usage(const char *prog) {
   std::cout << "Usage:\n"
@@ -71,6 +81,11 @@ static Status parse_args(int argc, char **argv, Options &opt) {
   for (int i = 1; i < argc; ++i) {
     std::string_view a(argv[i]);
 
+    if (a == "--continue" || a == "-c") {
+      opt.continue_on_error = true;
+      continue;
+    }
+
     if (a == "--help" || a == "-h") {
       opt.help = true;
       return {0, ""};
@@ -111,10 +126,6 @@ static Status parse_args(int argc, char **argv, Options &opt) {
       continue;
     }
 
-    if (!a.empty() && a[0] == '-') {
-      return {4, "Unknown option: " + std::string(a)};
-    }
-
     // positional path
     if (opt.input.empty()) {
       opt.input = fs::path(a);
@@ -132,7 +143,9 @@ struct Totals {
   std::uint64_t files = 0;
   std::uint64_t lines = 0;
   std::uint64_t bytes = 0;
+  std::uint64_t errors = 0;
   std::vector<std::string> preview;
+  std::vector<std::string> error_messages;
 };
 
 static Status scan_one_file(const fs::path &p, Totals &t,
@@ -190,8 +203,15 @@ static Status run(const Options &opt, Totals &totals) {
       if (!ext_allowed(p, opt))
         continue;
       Status s = scan_one_file(p, totals, opt.preview_lines);
-      if (s.code != 0)
-        return s;
+      if (s.code != 0) {
+        if (!opt.continue_on_error)
+          return s;
+        ++totals.errors;
+        if (totals.error_messages.size() < 5) {
+          totals.error_messages.push_back(s.message);
+        }
+        continue;
+      }
     }
   } else {
     for (fs::directory_iterator it(opt.input, ec), end; it != end;
@@ -204,8 +224,15 @@ static Status run(const Options &opt, Totals &totals) {
       if (!ext_allowed(p, opt))
         continue;
       Status s = scan_one_file(p, totals, opt.preview_lines);
-      if (s.code != 0)
-        return s;
+      if (s.code != 0) {
+        if (!opt.continue_on_error)
+          return s;
+        ++totals.errors;
+        if (totals.error_messages.size() < 5) {
+          totals.error_messages.push_back(s.message);
+        }
+        continue;
+      }
     }
   }
 
@@ -244,6 +271,13 @@ int main(int argc, char **argv) {
     std::cout << "\nPreview (" << totals.preview.size() << " lines):\n";
     for (std::size_t i = 0; i < totals.preview.size(); ++i) {
       std::cout << (i + 1) << ": " << totals.preview[i] << "\n";
+    }
+  }
+
+  if (totals.errors > 0) {
+    std::cout << "\nErrors: " << totals.errors << "\n";
+    for (const auto &msg : totals.error_messages) {
+      std::cout << "  " << msg << "\n";
     }
   }
 
